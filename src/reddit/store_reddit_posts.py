@@ -20,14 +20,21 @@ if str(WORKSPACE_ROOT) not in sys.path:
 
 from schema import ensure_tables  # noqa: E402
 
+DEFAULT_SUBREDDITS = ["OpenAI", "singularity", "ClaudeAI"]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Fetch Reddit posts via API and store them into MySQL tables."
     )
-    parser.add_argument("--subreddit", default="OpenAI", help="Target subreddit")
-    parser.add_argument("--limit", type=int, default=10, help="Fetch count (1-100)")
-    parser.add_argument("--max-age-hours", type=int, default=24, help="Age window")
+    parser.add_argument(
+        "--subreddit",
+        action="append",
+        dest="subreddits",
+        help="Target subreddit (repeatable). If omitted, defaults are used.",
+    )
+    parser.add_argument("--limit", type=int, default=50, help="Fetch count (1-100)")
+    parser.add_argument("--max-age-hours", type=int, default=6, help="Age window")
     parser.add_argument(
         "--with-comments",
         action="store_true",
@@ -54,8 +61,8 @@ def _db_config_from_env() -> dict[str, Any]:
     }
 
 
-def _upsert_source(conn, subreddit: str) -> int:
-    code = f"reddit_{subreddit.lower()}_new"
+def _upsert_source(conn, subreddit: str) -> tuple[int, bool, bool]:
+    code = f"{subreddit}"
     name = f"Reddit /r/{subreddit}"
     url_pattern = f"https://www.reddit.com/r/{subreddit}/comments/{{external_id}}"
     parser = "reddit_oauth_v1"
@@ -69,12 +76,16 @@ def _upsert_source(conn, subreddit: str) -> int:
     )
 
     with conn.cursor() as cur:
+        cur.execute("SELECT id, is_active FROM source WHERE code = %s", (code,))
+        existing = cur.fetchone()
+        created = existing is None
+
         cur.execute(
             """
             INSERT INTO source (
-                code, name, url_pattern, parser, fetch_interval_minutes, is_active, metadata
+                code, name, url_pattern, parser, fetch_interval_minutes, metadata
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 name = VALUES(name),
                 url_pattern = VALUES(url_pattern),
@@ -83,16 +94,17 @@ def _upsert_source(conn, subreddit: str) -> int:
                 metadata = VALUES(metadata),
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (code, name, url_pattern, parser, 60, True, metadata),
+            (code, name, url_pattern, parser, 60, metadata),
         )
-        cur.execute("SELECT id FROM source WHERE code = %s", (code,))
+        cur.execute("SELECT id, is_active FROM source WHERE code = %s", (code,))
         row = cur.fetchone()
         if not row:
             raise RuntimeError(f"Failed to load source id for code={code}")
-        return int(row[0])
+        # MySQL BOOLEAN is stored as TINYINT(1): 0/1.
+        return int(row[0]), bool(int(row[1] or 0)), created
 
 
-def _upsert_post(conn, source_id: int, post: RedditPost) -> int:
+def _upsert_post(conn, source_id: int, post: RedditPost) -> tuple[int, bool]:
     published_at = post.created_at.astimezone(timezone.utc).replace(tzinfo=None)
     metadata = json.dumps(
         {
@@ -108,6 +120,12 @@ def _upsert_post(conn, source_id: int, post: RedditPost) -> int:
     content = post.selftext or None
 
     with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM item WHERE source_id = %s AND external_id = %s",
+            (source_id, post.external_id),
+        )
+        existed = cur.fetchone() is not None
+
         cur.execute(
             """
             INSERT INTO item (
@@ -140,7 +158,7 @@ def _upsert_post(conn, source_id: int, post: RedditPost) -> int:
         row = cur.fetchone()
         if not row:
             raise RuntimeError(f"Failed to load item id for external_id={post.external_id}")
-        return int(row[0])
+        return int(row[0]), (not existed)
 
 
 def _replace_assets(conn, item_id: int, media_urls: list[str]) -> int:
@@ -233,46 +251,107 @@ def _replace_comments(conn, item_id: int, comments: list[RedditComment]) -> int:
     return len(inserted)
 
 
+def _insert_crawl_run_log(
+    conn,
+    *,
+    source_name: str,
+    queued_count: int,
+    fetched_count: int,
+    filtered_count: int,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO crawl_run_log (
+                source, queued_count, fetched_count, filtered_count
+            ) VALUES (%s, %s, %s, %s)
+            """,
+            (source_name, queued_count, fetched_count, filtered_count),
+        )
+
+
 def main() -> None:
     args = parse_args()
     load_dotenv(args.env_file)
 
     creds = RedditOAuthCredentials.from_env(args.env_file)
     reddit = RedditAPIClient(creds)
-    posts = reddit.fetch_new_posts(
-        args.subreddit,
-        limit=args.limit,
-        max_age_hours=args.max_age_hours,
-        include_comments=args.with_comments,
-    )
-    if not posts:
-        print("No posts fetched.")
-        return
+    subreddits = args.subreddits or DEFAULT_SUBREDDITS
 
     db_config = _db_config_from_env()
     with pymysql.connect(**db_config) as conn:
         if args.ensure_schema:
             ensure_tables(conn)
+        total_posts = 0
+        total_created = 0
+        total_updated = 0
+        total_assets = 0
+        total_comments = 0
 
-        source_id = _upsert_source(conn, args.subreddit)
-        saved_posts = 0
-        saved_assets = 0
-        saved_comments = 0
+        for subreddit in subreddits:
+            source_id, is_active, created = _upsert_source(conn, subreddit)
+            source_name = f"Reddit /r/{subreddit}"
+            if created:
+                print(
+                    f"Created source for r/{subreddit} with is_active=0. "
+                    "Set is_active=1 to enable crawling."
+                )
+            if not is_active:
+                print(f"Source for r/{subreddit} is inactive; skipping.")
+                continue
 
-        for post in posts:
-            item_id = _upsert_post(conn, source_id, post)
-            saved_posts += 1
-            saved_assets += _replace_assets(conn, item_id, post.media_urls)
-            saved_comments += _replace_comments(conn, item_id, post.comments)
+            posts = reddit.fetch_new_posts(
+                subreddit,
+                limit=args.limit,
+                max_age_hours=args.max_age_hours,
+                include_comments=args.with_comments,
+            )
+            fetched_count = len(posts)
+            filtered_count = len(posts)
+            saved_posts = 0
+            created_posts = 0
+            updated_posts = 0
+            saved_assets = 0
+            saved_comments = 0
+
+            for post in posts:
+                item_id, is_created = _upsert_post(conn, source_id, post)
+                saved_posts += 1
+                if is_created:
+                    created_posts += 1
+                else:
+                    updated_posts += 1
+                saved_assets += _replace_assets(conn, item_id, post.media_urls)
+                saved_comments += _replace_comments(conn, item_id, post.comments)
+
+            _insert_crawl_run_log(
+                conn,
+                source_name=source_name,
+                queued_count=saved_posts,
+                fetched_count=fetched_count,
+                filtered_count=filtered_count,
+            )
+
+            total_posts += saved_posts
+            total_created += created_posts
+            total_updated += updated_posts
+            total_assets += saved_assets
+            total_comments += saved_comments
+
+            print(
+                f"Stored subreddit={subreddit} posts={saved_posts}, "
+                f"created={created_posts}, updated={updated_posts}, "
+                f"assets={saved_assets}, comments={saved_comments}"
+            )
 
         conn.commit()
 
     print(
-        f"Stored subreddit={args.subreddit} posts={saved_posts}, "
-        f"assets={saved_assets}, comments={saved_comments}"
+        f"Stored total subreddits={len(subreddits)} posts={total_posts}, "
+        f"created={total_created}, updated={total_updated}, "
+        f"assets={total_assets}, comments={total_comments}"
     )
 
 
 if __name__ == "__main__":
     main()
-
