@@ -1,3 +1,4 @@
 pymysql
 python-dotenv
 requests
+groq

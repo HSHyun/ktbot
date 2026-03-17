@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import timezone
 from pathlib import Path
@@ -59,6 +60,35 @@ def _db_config_from_env() -> dict[str, Any]:
         "charset": os.getenv("DB_CHARSET", "utf8mb4"),
         "autocommit": False,
     }
+
+
+def _normalise_subreddit_key(subreddit: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", subreddit).upper()
+
+
+def _parse_allowed_flairs(raw: str | None) -> set[str]:
+    if not raw:
+        return set()
+    values = {chunk.strip().casefold() for chunk in raw.split(",") if chunk.strip()}
+    return values
+
+
+def _allowed_flairs_for_subreddit(subreddit: str) -> set[str]:
+    sub_key = _normalise_subreddit_key(subreddit)
+    per_sub = os.getenv(f"REDDIT_ALLOWED_FLAIRS_{sub_key}")
+    global_raw = os.getenv("REDDIT_ALLOWED_FLAIRS_GLOBAL")
+    return _parse_allowed_flairs(per_sub) or _parse_allowed_flairs(global_raw)
+
+
+def _filter_posts_by_flair(posts: list[RedditPost], allowed_flairs: set[str]) -> list[RedditPost]:
+    if not allowed_flairs:
+        return posts
+    filtered: list[RedditPost] = []
+    for post in posts:
+        flair_value = (post.flair or "").strip().casefold()
+        if flair_value in allowed_flairs:
+            filtered.append(post)
+    return filtered
 
 
 def _upsert_source(conn, subreddit: str) -> tuple[int, bool, bool]:
@@ -307,6 +337,8 @@ def main() -> None:
                 include_comments=args.with_comments,
             )
             fetched_count = len(posts)
+            allowed_flairs = _allowed_flairs_for_subreddit(subreddit)
+            posts = _filter_posts_by_flair(posts, allowed_flairs)
             filtered_count = len(posts)
             saved_posts = 0
             created_posts = 0
@@ -341,7 +373,8 @@ def main() -> None:
             print(
                 f"Stored subreddit={subreddit} posts={saved_posts}, "
                 f"created={created_posts}, updated={updated_posts}, "
-                f"assets={saved_assets}, comments={saved_comments}"
+                f"assets={saved_assets}, comments={saved_comments}, "
+                f"fetched={fetched_count}, filtered={filtered_count}"
             )
 
         conn.commit()

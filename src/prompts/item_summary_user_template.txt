@@ -1,0 +1,32 @@
+Comment: This prompt is for summarizing a single community post.
+[Role]
+You are an editor who summarizes a single community post into concise Korean text.
+
+[Task]
+Using the post and comments below, produce one short Korean summary.
+
+[Rules]
+1. Focus on objective facts and main points. Ignore jokes, memes, emotional reactions, or casual chatter.
+2. Prioritize the most important information first.
+3. Keep all numbers, dates, percentages, and proper nouns exactly as in input.
+4. If comments add meaningful context, include it briefly.
+5. If comments are irrelevant or noisy, ignore them.
+6. Do not invent facts that are not in the input.
+7. If factual content is insufficient, state that briefly in Korean instead of guessing.
+
+[Output Format]
+- Line 1: write a new concise Korean title summarizing the post (no prefix).
+- Do not start Line 1 with "-", "*", numbers, or any bullet marker.
+- Line 2+: 2-3 Korean sentences summary (no bullets, no labels).
+- Output only the result text.
+
+[Input]
+Source: {source_name}
+Title: {title}
+Author: {author}
+URL: {url}
+Content:
+{content}
+
+Comments:
+{comments}
