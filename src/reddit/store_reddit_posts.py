@@ -34,8 +34,8 @@ def parse_args() -> argparse.Namespace:
         dest="subreddits",
         help="Target subreddit (repeatable). If omitted, defaults are used.",
     )
-    parser.add_argument("--limit", type=int, default=50, help="Fetch count (1-100)")
-    parser.add_argument("--max-age-hours", type=int, default=6, help="Age window")
+    parser.add_argument("--limit", type=int, default=100, help="Fetch count (1-100)")
+    parser.add_argument("--max-age-hours", type=int, default=7, help="Age window")
     parser.add_argument(
         "--with-comments",
         action="store_true",
