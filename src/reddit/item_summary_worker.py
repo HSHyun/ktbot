@@ -4,12 +4,19 @@ import argparse
 import json
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 import pymysql
 from groq import Groq
-from common.config import db_config_from_env, load_env_file, required_env
+from common.config import (
+    db_config_from_env,
+    load_env_file,
+    rabbitmq_config_from_env,
+    required_env,
+)
 from common.db import connect_db
+from common.queue import declare_durable_queue, open_rabbitmq_connection
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
 DEFAULT_USER_PROMPT_TEMPLATE_PATH = PROMPT_DIR / "item_summary_user_template.txt"
@@ -17,16 +24,9 @@ DEFAULT_USER_PROMPT_TEMPLATE_PATH = PROMPT_DIR / "item_summary_user_template.txt
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build item_summary rows using Groq for unsummarized items."
+        description="Consume item_id messages and build item summaries."
     )
     parser.add_argument("--env-file", default=".env", help="Path to .env")
-    parser.add_argument("--limit", type=int, default=50, help="Max items per run")
-    parser.add_argument(
-        "--hours",
-        type=int,
-        default=7,
-        help="Only consider items published/seen within this many hours",
-    )
     parser.add_argument(
         "--user-prompt-template-file",
         default=str(DEFAULT_USER_PROMPT_TEMPLATE_PATH),
@@ -38,7 +38,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _fetch_targets(conn, *, model_name: str, limit: int, hours: int) -> list[dict]:
+def _read_text(path: str | Path, label: str) -> str:
+    raw = Path(path).read_text(encoding="utf-8")
+    lines = raw.splitlines()
+    if len(lines) <= 1:
+        raise RuntimeError(
+            f"{label} must contain at least two lines (first line is ignored): {path}"
+        )
+    text = "\n".join(lines[1:]).strip()
+    if not text:
+        raise RuntimeError(f"{label} has no usable content after the first line: {path}")
+    return text
+
+
+def _fetch_item_by_id(conn, *, item_id: int) -> dict[str, Any] | None:
     with conn.cursor(pymysql.cursors.DictCursor) as cur:
         cur.execute(
             """
@@ -53,17 +66,27 @@ def _fetch_targets(conn, *, model_name: str, limit: int, hours: int) -> list[dic
                 s.name AS source_name
             FROM item i
             JOIN source s ON s.id = i.source_id
-            LEFT JOIN item_summary isum
-                ON isum.item_id = i.id AND isum.model_name = %s
-            WHERE s.is_active = 1
-              AND isum.id IS NULL
-              AND COALESCE(i.published_at, i.first_seen_at) >= UTC_TIMESTAMP() - INTERVAL %s HOUR
-            ORDER BY COALESCE(i.published_at, i.first_seen_at) DESC
-            LIMIT %s
+            WHERE i.id = %s
+            LIMIT 1
             """,
-            (model_name, hours, limit),
+            (item_id,),
         )
-        return list(cur.fetchall())
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def _summary_exists(conn, *, item_id: int, model_name: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1
+            FROM item_summary
+            WHERE item_id = %s AND model_name = %s
+            LIMIT 1
+            """,
+            (item_id, model_name),
+        )
+        return cur.fetchone() is not None
 
 
 def _fetch_comments_text(conn, item_id: int, limit: int = 20) -> list[str]:
@@ -103,20 +126,7 @@ def _fetch_comments_text(conn, item_id: int, limit: int = 20) -> list[str]:
     return lines
 
 
-def _read_text(path: str | Path, label: str) -> str:
-    raw = Path(path).read_text(encoding="utf-8")
-    lines = raw.splitlines()
-    if len(lines) <= 1:
-        raise RuntimeError(
-            f"{label} must contain at least two lines (first line is ignored): {path}"
-        )
-    text = "\n".join(lines[1:]).strip()
-    if not text:
-        raise RuntimeError(f"{label} has no usable content after the first line: {path}")
-    return text
-
-
-def _build_prompt(item: dict, comment_lines: list[str], template_text: str) -> str:
+def _build_prompt(item: dict[str, Any], comment_lines: list[str], template_text: str) -> str:
     title = (item.get("title") or "").strip()
     url = item.get("url") or ""
     author = item.get("author") or ""
@@ -192,24 +202,46 @@ def main() -> None:
 
     groq_api_key = required_env("GROQ_API_KEY")
 
-    model_name = (os.getenv("GROQ_SUMMARY_MODEL") or "meta-llama/llama-4-scout-17b-16e-instruct").strip()
-    user_prompt_template = _read_text(args.user_prompt_template_file, "User prompt template")
+    model_name = (
+        os.getenv("GROQ_SUMMARY_MODEL") or "meta-llama/llama-4-scout-17b-16e-instruct"
+    ).strip()
+    prompt_template = _read_text(args.user_prompt_template_file, "User prompt template")
+    db_config = db_config_from_env()
+    rabbitmq_config = rabbitmq_config_from_env()
     client = Groq(api_key=groq_api_key)
 
-    db_config = db_config_from_env()
-    with connect_db(db_config) as conn:
-        targets = _fetch_targets(conn, model_name=model_name, limit=args.limit, hours=args.hours)
-        if not targets:
-            print("No target items for summary.")
+    queue_name = rabbitmq_config.queue_item_summary
+    connection = open_rabbitmq_connection(rabbitmq_config)
+    channel = connection.channel()
+    declare_durable_queue(channel, queue_name)
+    channel.basic_qos(prefetch_count=1)
+
+    print(f"Worker started queue={queue_name} model={model_name} prefetch=1")
+
+    def on_message(ch, method, _properties, body: bytes) -> None:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+            item_id = int(payload["item_id"])
+        except Exception as exc:  # noqa: BLE001
+            print(f"[worker-drop] invalid message: {body!r} err={exc}")
+            ch.basic_ack(delivery_tag=method.delivery_tag)
             return
 
-        success = 0
-        failed = 0
-        for item in targets:
-            item_id = int(item["id"])
-            comments = _fetch_comments_text(conn, item_id=item_id, limit=20)
-            prompt = _build_prompt(item, comments, user_prompt_template)
-            try:
+        try:
+            with connect_db(db_config) as conn:
+                item = _fetch_item_by_id(conn, item_id=item_id)
+                if not item:
+                    print(f"[worker-skip] item_id={item_id} not found")
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    return
+
+                if _summary_exists(conn, item_id=item_id, model_name=model_name):
+                    print(f"[worker-skip] item_id={item_id} already summarized")
+                    ch.basic_ack(delivery_tag=method.delivery_tag)
+                    return
+
+                comments = _fetch_comments_text(conn, item_id=item_id, limit=20)
+                prompt = _build_prompt(item, comments, prompt_template)
                 summary_text, summary_title = _summarise_with_groq(
                     client=client,
                     model_name=model_name,
@@ -224,17 +256,24 @@ def main() -> None:
                     meta={
                         "source_code": item.get("source_code"),
                         "comment_count_used": len(comments),
+                        "queue": queue_name,
                     },
                 )
-                success += 1
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                print(f"[summary-fail] item_id={item_id}: {exc}")
+                conn.commit()
 
-        conn.commit()
-        print(
-            f"Summary run complete: targets={len(targets)}, success={success}, failed={failed}, model={model_name}"
-        )
+            print(f"[worker-ok] item_id={item_id}")
+            ch.basic_ack(delivery_tag=method.delivery_tag)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[worker-fail] item_id={item_id} err={exc}")
+            ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+        finally:
+            time.sleep(60)
+
+    channel.basic_consume(queue=queue_name, on_message_callback=on_message, auto_ack=False)
+    try:
+        channel.start_consuming()
+    finally:
+        connection.close()
 
 
 if __name__ == "__main__":

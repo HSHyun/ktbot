@@ -2,3 +2,4 @@ pymysql
 python-dotenv
 requests
 groq
+pika

@@ -7,10 +7,10 @@ import re
 import sys
 from datetime import timezone
 from pathlib import Path
-from typing import Any
 
-import pymysql
-from dotenv import load_dotenv
+from common.config import db_config_from_env, load_env_file, rabbitmq_config_from_env
+from common.db import connect_db
+from common.queue import declare_durable_queue, open_rabbitmq_connection, publish_json_messages
 
 from reddit.client import RedditAPIClient, RedditOAuthCredentials
 from reddit.models import RedditComment, RedditPost
@@ -50,16 +50,22 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _db_config_from_env() -> dict[str, Any]:
-    return {
-        "host": os.getenv("DB_HOST", "127.0.0.1"),
-        "port": int(os.getenv("DB_PORT", "13306")),
-        "user": os.getenv("DB_USER"),
-        "password": os.getenv("DB_PASSWORD"),
-        "database": os.getenv("DB_NAME", "ktbot"),
-        "charset": os.getenv("DB_CHARSET", "utf8mb4"),
-        "autocommit": False,
-    }
+def _publish_item_ids(item_ids: list[int], queue_name: str, rabbitmq_config) -> int:
+    if not item_ids:
+        return 0
+    connection = open_rabbitmq_connection(rabbitmq_config)
+    try:
+        channel = connection.channel()
+        declare_durable_queue(channel, queue_name)
+        payloads = ({"item_id": item_id} for item_id in item_ids)
+        published = publish_json_messages(
+            channel,
+            queue_name=queue_name,
+            payloads=payloads,
+        )
+    finally:
+        connection.close()
+    return published
 
 
 def _normalise_subreddit_key(subreddit: str) -> str:
@@ -302,14 +308,16 @@ def _insert_crawl_run_log(
 
 def main() -> None:
     args = parse_args()
-    load_dotenv(args.env_file)
+    load_env_file(args.env_file)
 
     creds = RedditOAuthCredentials.from_env(args.env_file)
     reddit = RedditAPIClient(creds)
     subreddits = args.subreddits or DEFAULT_SUBREDDITS
+    rabbitmq_config = rabbitmq_config_from_env()
+    queue_name = rabbitmq_config.queue_item_summary
 
-    db_config = _db_config_from_env()
-    with pymysql.connect(**db_config) as conn:
+    db_config = db_config_from_env()
+    with connect_db(db_config) as conn:
         if args.ensure_schema:
             ensure_tables(conn)
         total_posts = 0
@@ -317,6 +325,7 @@ def main() -> None:
         total_updated = 0
         total_assets = 0
         total_comments = 0
+        created_item_ids_to_publish: list[int] = []
 
         for subreddit in subreddits:
             source_id, is_active, created = _upsert_source(conn, subreddit)
@@ -351,6 +360,7 @@ def main() -> None:
                 saved_posts += 1
                 if is_created:
                     created_posts += 1
+                    created_item_ids_to_publish.append(item_id)
                 else:
                     updated_posts += 1
                 saved_assets += _replace_assets(conn, item_id, post.media_urls)
@@ -379,10 +389,22 @@ def main() -> None:
 
         conn.commit()
 
+    published_count = 0
+    if created_item_ids_to_publish:
+        try:
+            published_count = _publish_item_ids(
+                created_item_ids_to_publish,
+                queue_name,
+                rabbitmq_config,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[rabbitmq-publish-fail] {exc}")
+
     print(
         f"Stored total subreddits={len(subreddits)} posts={total_posts}, "
         f"created={total_created}, updated={total_updated}, "
-        f"assets={total_assets}, comments={total_comments}"
+        f"assets={total_assets}, comments={total_comments}, "
+        f"published_item_ids={published_count}"
     )
 
 

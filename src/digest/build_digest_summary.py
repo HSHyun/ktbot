@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import pymysql
-from dotenv import load_dotenv
 from groq import Groq
+from common.config import db_config_from_env, load_env_file, required_env
+from common.db import connect_db
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
 DEFAULT_USER_PROMPT_TEMPLATE_PATH = PROMPT_DIR / "digest_user_template.txt"
@@ -33,18 +34,6 @@ def parse_args() -> argparse.Namespace:
         help="item_summary model_name to use (default: GROQ_SUMMARY_MODEL env or built-in default)",
     )
     return parser.parse_args()
-
-
-def _db_config_from_env() -> dict[str, Any]:
-    return {
-        "host": os.getenv("DB_HOST", "127.0.0.1"),
-        "port": int(os.getenv("DB_PORT", "13306")),
-        "user": os.getenv("DB_USER"),
-        "password": os.getenv("DB_PASSWORD"),
-        "database": os.getenv("DB_NAME", "ktbot"),
-        "charset": os.getenv("DB_CHARSET", "utf8mb4"),
-        "autocommit": False,
-    }
 
 
 def _ensure_digest_table(conn) -> None:
@@ -100,8 +89,6 @@ def _fetch_items(
                 i.url,
                 i.author,
                 i.metadata,
-                i.published_at,
-                i.first_seen_at,
                 s.code AS source_code,
                 s.name AS source_name,
                 isum.summary_title,
@@ -282,11 +269,9 @@ def _replace_digest_issues(conn, *, digest_id: int, issues: list[dict[str, str]]
 
 def main() -> None:
     args = parse_args()
-    load_dotenv(args.env_file)
+    load_env_file(args.env_file)
 
-    groq_api_key = (os.getenv("GROQ_API_KEY") or "").strip()
-    if not groq_api_key:
-        raise RuntimeError("Missing GROQ_API_KEY in environment.")
+    groq_api_key = required_env("GROQ_API_KEY")
     model_name = (os.getenv("GROQ_DIGEST_MODEL") or "openai/gpt-oss-120b").strip()
     item_summary_model = (
         args.item_summary_model
@@ -295,8 +280,8 @@ def main() -> None:
     ).strip()
     user_prompt_template = _read_text(args.user_prompt_template_file, "User prompt template")
 
-    db_config = _db_config_from_env()
-    with pymysql.connect(**db_config) as conn:
+    db_config = db_config_from_env()
+    with connect_db(db_config) as conn:
         _ensure_digest_table(conn)
         items = _fetch_items(
             conn,
