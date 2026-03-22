@@ -21,7 +21,13 @@ def parse_args() -> argparse.Namespace:
         description="Build time-window digest summary from all stored items."
     )
     parser.add_argument("--env-file", default=".env", help="Path to .env")
-    parser.add_argument("--hours", type=int, default=6, help="Digest window in hours")
+    parser.add_argument(
+        "--hours",
+        type=int,
+        action="append",
+        dest="hours_list",
+        help="Digest window in hours (repeatable). Default: 6",
+    )
     parser.add_argument("--limit", type=int, default=200, help="Max items to include")
     parser.add_argument(
         "--user-prompt-template-file",
@@ -34,6 +40,20 @@ def parse_args() -> argparse.Namespace:
         help="item_summary model_name to use (default: GROQ_SUMMARY_MODEL env or built-in default)",
     )
     return parser.parse_args()
+
+
+def _resolve_hours_list(raw_hours: list[int] | None) -> list[int]:
+    values = raw_hours or [6]
+    cleaned: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        if value <= 0:
+            raise RuntimeError(f"hours must be positive: {value}")
+        if value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    return cleaned
 
 
 def _ensure_digest_table(conn) -> None:
@@ -270,6 +290,7 @@ def _replace_digest_issues(conn, *, digest_id: int, issues: list[dict[str, str]]
 def main() -> None:
     args = parse_args()
     load_env_file(args.env_file)
+    hours_list = _resolve_hours_list(args.hours_list)
 
     groq_api_key = required_env("GROQ_API_KEY")
     model_name = (os.getenv("GROQ_DIGEST_MODEL") or "openai/gpt-oss-120b").strip()
@@ -283,50 +304,56 @@ def main() -> None:
     db_config = db_config_from_env()
     with connect_db(db_config) as conn:
         _ensure_digest_table(conn)
-        items = _fetch_items(
-            conn,
-            hours=args.hours,
-            limit=args.limit,
-            item_summary_model=item_summary_model,
-        )
-        if not items:
-            print(
-                "No summarized items in the requested window. "
-                "Run reddit.build_item_summary first or check --item-summary-model."
-            )
-            return
-
         client = Groq(api_key=groq_api_key)
-        prompt = _build_prompt(items, args.hours, user_prompt_template)
-        payload = _summarise_with_groq(client, model_name, prompt)
-        issues = payload["issues"]
-
+        any_saved = False
         window_end = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-        window_start = window_end - timedelta(hours=args.hours)
-        item_ids = [int(row["id"]) for row in items if row.get("id") is not None]
-        digest_id = _upsert_digest_summary(
-            conn,
-            window_start=window_start,
-            window_end=window_end,
-            hours_window=args.hours,
-            model_name=model_name,
-            item_count=len(items),
-            meta={
-                "item_ids": item_ids,
-                "issue_count": len(issues),
-                "item_summary_model": item_summary_model,
-            },
-        )
-        _replace_digest_issues(conn, digest_id=digest_id, issues=issues)
-        conn.commit()
+        for hours in hours_list:
+            items = _fetch_items(
+                conn,
+                hours=hours,
+                limit=args.limit,
+                item_summary_model=item_summary_model,
+            )
+            if not items:
+                print(
+                    f"No summarized items in the requested window (hours={hours}). "
+                    "Run reddit.build_item_summary first or check --item-summary-model."
+                )
+                continue
 
-        print(
-            f"Digest saved digest_id={digest_id}, hours={args.hours}, items={len(items)}, "
-            f"issues={len(issues)}, model={model_name}"
-        )
-        print("issues:")
-        for issue in issues:
-            print(f"- {issue['title']}")
+            prompt = _build_prompt(items, hours, user_prompt_template)
+            payload = _summarise_with_groq(client, model_name, prompt)
+            issues = payload["issues"]
+
+            window_start = window_end - timedelta(hours=hours)
+            item_ids = [int(row["id"]) for row in items if row.get("id") is not None]
+            digest_id = _upsert_digest_summary(
+                conn,
+                window_start=window_start,
+                window_end=window_end,
+                hours_window=hours,
+                model_name=model_name,
+                item_count=len(items),
+                meta={
+                    "item_ids": item_ids,
+                    "issue_count": len(issues),
+                    "item_summary_model": item_summary_model,
+                },
+            )
+            _replace_digest_issues(conn, digest_id=digest_id, issues=issues)
+            conn.commit()
+            any_saved = True
+
+            print(
+                f"Digest saved digest_id={digest_id}, hours={hours}, items={len(items)}, "
+                f"issues={len(issues)}, model={model_name}"
+            )
+            print("issues:")
+            for issue in issues:
+                print(f"- {issue['title']}")
+
+        if not any_saved:
+            raise RuntimeError("No digest was saved for any requested window.")
 
 
 if __name__ == "__main__":
