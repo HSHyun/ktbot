@@ -176,24 +176,25 @@ def ensure_tables(conn) -> None:
         )
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS digest_subscription (
+            CREATE TABLE IF NOT EXISTS kakao_subscription (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                guild_id BIGINT,
-                channel_id BIGINT NOT NULL UNIQUE,
+                kakao_user_id VARCHAR(191) NOT NULL,
                 hours_window INT NOT NULL DEFAULT 6,
-                interval_minutes INT NOT NULL DEFAULT 360,
+                timezone VARCHAR(100) NOT NULL DEFAULT 'Asia/Seoul',
+                send_hour TINYINT NOT NULL DEFAULT 8,
+                send_minute TINYINT NOT NULL DEFAULT 0,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
-                last_run_at TIMESTAMP NULL,
-                next_run_at TIMESTAMP NULL,
+                last_sent_window_end TIMESTAMP NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_kakao_subscription_user_window (kakao_user_id, hours_window)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """
         )
         _create_index_if_missing(
             cur,
-            "digest_subscription",
-            "idx_digest_subscription_next_run",
-            "CREATE INDEX idx_digest_subscription_next_run ON digest_subscription (is_active, next_run_at);",
+            "kakao_subscription",
+            "idx_kakao_subscription_schedule",
+            "CREATE INDEX idx_kakao_subscription_schedule ON kakao_subscription (is_active, timezone, send_hour, send_minute);",
         )
     conn.commit()

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,8 @@ import pymysql
 from groq import Groq
 from common.config import db_config_from_env, load_env_file, required_env
 from common.db import connect_db
+from digest.providers import resolve_digest_model, summarise_with_gemini
+from digest.windows import floor_to_slot_end, parse_slot_end, slot_window_bounds
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
 DEFAULT_USER_PROMPT_TEMPLATE_PATH = PROMPT_DIR / "digest_user_template.txt"
@@ -38,6 +40,11 @@ def parse_args() -> argparse.Namespace:
         "--item-summary-model",
         default=None,
         help="item_summary model_name to use (default: GROQ_SUMMARY_MODEL env or built-in default)",
+    )
+    parser.add_argument(
+        "--slot-end",
+        default=None,
+        help="UTC slot end timestamp to anchor digest windows (ISO 8601)",
     )
     return parser.parse_args()
 
@@ -97,7 +104,8 @@ def _ensure_digest_table(conn) -> None:
 def _fetch_items(
     conn,
     *,
-    hours: int,
+    window_start: datetime,
+    window_end: datetime,
     limit: int,
     item_summary_model: str,
 ) -> list[dict]:
@@ -120,11 +128,17 @@ def _fetch_items(
               ON isum.item_id = i.id
              AND isum.model_name = %s
             WHERE s.is_active = 1
-              AND COALESCE(i.published_at, i.first_seen_at) >= UTC_TIMESTAMP() - INTERVAL %s HOUR
+              AND COALESCE(i.published_at, i.first_seen_at) >= %s
+              AND COALESCE(i.published_at, i.first_seen_at) < %s
             ORDER BY COALESCE(i.published_at, i.first_seen_at) DESC
             LIMIT %s
             """,
-            (item_summary_model, hours, limit),
+            (
+                item_summary_model,
+                window_start.replace(tzinfo=None),
+                window_end.replace(tzinfo=None),
+                limit,
+            ),
         )
         return list(cur.fetchall())
 
@@ -292,8 +306,6 @@ def main() -> None:
     load_env_file(args.env_file)
     hours_list = _resolve_hours_list(args.hours_list)
 
-    groq_api_key = required_env("GROQ_API_KEY")
-    model_name = (os.getenv("GROQ_DIGEST_MODEL") or "openai/gpt-oss-120b").strip()
     item_summary_model = (
         args.item_summary_model
         or os.getenv("GROQ_SUMMARY_MODEL")
@@ -304,40 +316,61 @@ def main() -> None:
     db_config = db_config_from_env()
     with connect_db(db_config) as conn:
         _ensure_digest_table(conn)
-        client = Groq(api_key=groq_api_key)
+        groq_client: Groq | None = None
         any_saved = False
-        window_end = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        slot_end = (
+            parse_slot_end(args.slot_end)
+            if args.slot_end
+            else floor_to_slot_end(datetime.now(timezone.utc))
+        )
         for hours in hours_list:
+            window_start, window_end = slot_window_bounds(slot_end, hours)
             items = _fetch_items(
                 conn,
-                hours=hours,
+                window_start=window_start,
+                window_end=window_end,
                 limit=args.limit,
                 item_summary_model=item_summary_model,
             )
             if not items:
                 print(
-                    f"No summarized items in the requested window (hours={hours}). "
+                    f"No summarized items in the requested window "
+                    f"(hours={hours}, window={window_start.isoformat()}~{window_end.isoformat()}). "
                     "Run reddit.build_item_summary first or check --item-summary-model."
                 )
                 continue
 
             prompt = _build_prompt(items, hours, user_prompt_template)
-            payload = _summarise_with_groq(client, model_name, prompt)
+            model_config = resolve_digest_model(hours)
+            if model_config.provider == "groq":
+                if groq_client is None:
+                    groq_client = Groq(api_key=required_env("GROQ_API_KEY"))
+                payload = _summarise_with_groq(
+                    groq_client,
+                    model_config.model_name,
+                    prompt,
+                )
+            elif model_config.provider == "gemini":
+                payload = summarise_with_gemini(prompt, model_config.model_name)
+            else:
+                raise RuntimeError(
+                    f"Unsupported digest provider: {model_config.provider}"
+                )
             issues = payload["issues"]
 
-            window_start = window_end - timedelta(hours=hours)
             item_ids = [int(row["id"]) for row in items if row.get("id") is not None]
             digest_id = _upsert_digest_summary(
                 conn,
                 window_start=window_start,
                 window_end=window_end,
                 hours_window=hours,
-                model_name=model_name,
+                model_name=model_config.model_name,
                 item_count=len(items),
                 meta={
                     "item_ids": item_ids,
                     "issue_count": len(issues),
                     "item_summary_model": item_summary_model,
+                    "provider": model_config.provider,
                 },
             )
             _replace_digest_issues(conn, digest_id=digest_id, issues=issues)
@@ -346,7 +379,9 @@ def main() -> None:
 
             print(
                 f"Digest saved digest_id={digest_id}, hours={hours}, items={len(items)}, "
-                f"issues={len(issues)}, model={model_name}"
+                f"issues={len(issues)}, provider={model_config.provider}, "
+                f"model={model_config.model_name}, "
+                f"window_start={window_start.isoformat()}, window_end={window_end.isoformat()}"
             )
             print("issues:")
             for issue in issues:

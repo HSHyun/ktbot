@@ -5,15 +5,16 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 from urllib.parse import quote
 
 import requests
 
 from common.config import db_config_from_env, load_env_file, rabbitmq_config_from_env
 from common.db import connect_db
+from digest.providers import resolve_digest_model
+from digest.windows import floor_to_slot_end, is_window_due_at_slot, slot_window_bounds
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,30 +113,33 @@ def _resolve_digest_hours(raw: list[int] | None) -> list[int]:
     return cleaned
 
 
-def _is_digest_due(
+def _digest_exists_for_slot(
     conn,
     *,
+    window_start: datetime,
+    window_end: datetime,
     hours: int,
     digest_model: str,
-    now_utc: datetime,
 ) -> bool:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT MAX(window_end)
+            SELECT 1
             FROM digest_summary
-            WHERE hours_window = %s
+            WHERE window_start = %s
+              AND window_end = %s
+              AND hours_window = %s
               AND model_name = %s
+            LIMIT 1
             """,
-            (hours, digest_model),
+            (
+                window_start.replace(tzinfo=None),
+                window_end.replace(tzinfo=None),
+                hours,
+                digest_model,
+            ),
         )
-        row = cur.fetchone()
-        last_end = row[0] if row else None
-    if last_end is None:
-        return True
-    if getattr(last_end, "tzinfo", None) is None:
-        last_end = last_end.replace(tzinfo=timezone.utc)
-    return (now_utc - last_end) >= timedelta(hours=hours)
+        return cur.fetchone() is not None
 
 
 def _run_digest_once(
@@ -144,6 +148,7 @@ def _run_digest_once(
     hours: int,
     limit: int,
     item_summary_model: str,
+    slot_end: datetime,
 ) -> None:
     cmd = [
         sys.executable,
@@ -157,6 +162,8 @@ def _run_digest_once(
         str(limit),
         "--item-summary-model",
         item_summary_model,
+        "--slot-end",
+        slot_end.isoformat(),
     ]
     print("[digest-run] " + " ".join(cmd))
     subprocess.run(cmd, check=True)
@@ -168,7 +175,6 @@ def main() -> None:
     load_env_file(env_file)
 
     rabbit = rabbitmq_config_from_env()
-    digest_model = (os.getenv("GROQ_DIGEST_MODEL") or "llama-3.3-70b-versatile").strip()
     item_summary_model = (
         args.item_summary_model
         or os.getenv("GROQ_SUMMARY_MODEL")
@@ -186,24 +192,32 @@ def main() -> None:
     )
 
     db_config = db_config_from_env()
-    now_utc = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    slot_end = floor_to_slot_end(datetime.now(timezone.utc))
     due_hours: list[int] = []
     with connect_db(db_config) as conn:
         for hours in digest_hours:
-            if _is_digest_due(
+            if not is_window_due_at_slot(slot_end, hours):
+                continue
+            window_start, window_end = slot_window_bounds(slot_end, hours)
+            model_config = resolve_digest_model(hours)
+            if not _digest_exists_for_slot(
                 conn,
+                window_start=window_start,
+                window_end=window_end,
                 hours=hours,
-                digest_model=digest_model,
-                now_utc=now_utc,
+                digest_model=model_config.model_name,
             ):
                 due_hours.append(hours)
 
     if not due_hours:
-        print("[digest] no due windows")
+        print(f"[digest] no due windows slot_end={slot_end.isoformat()}")
         return
 
+    due_models = {
+        hours: resolve_digest_model(hours).model_name for hours in due_hours
+    }
     print(
-        f"[digest] due_hours={due_hours}, model={digest_model}, "
+        f"[digest] slot_end={slot_end.isoformat()}, due_hours={due_hours}, models={due_models}, "
         f"item_summary_model={item_summary_model}, limit={args.limit}"
     )
     for hours in due_hours:
@@ -212,9 +226,9 @@ def main() -> None:
             hours=hours,
             limit=args.limit,
             item_summary_model=item_summary_model,
+            slot_end=slot_end,
         )
 
 
 if __name__ == "__main__":
     main()
-
