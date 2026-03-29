@@ -11,7 +11,7 @@ import pymysql
 from groq import Groq
 from common.config import db_config_from_env, load_env_file, required_env
 from common.db import connect_db
-from digest.providers import resolve_digest_model, summarise_with_gemini
+from digest.providers import parse_issues_json, resolve_digest_model, summarise_with_gemini
 from digest.windows import floor_to_slot_end, parse_slot_end, slot_window_bounds
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
@@ -214,37 +214,7 @@ def _summarise_with_groq(
         raise RuntimeError(
             f"Groq returned empty digest. finish_reason={finish_reason}, prompt_chars={len(prompt)}"
         )
-    return _parse_issues_json(raw)
-
-
-def _parse_issues_json(raw: str) -> dict[str, Any]:
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if len(lines) >= 3:
-            text = "\n".join(lines[1:-1]).strip()
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Model output is not valid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("Model JSON must be an object.")
-    issues = payload.get("issues")
-    if not isinstance(issues, list):
-        raise RuntimeError("Model JSON must include 'issues' array.")
-    cleaned: list[dict[str, str]] = []
-    for issue in issues:
-        if not isinstance(issue, dict):
-            continue
-        title = str(issue.get("title") or "").strip()
-        summary = str(issue.get("summary") or "").strip()
-        if not title or not summary:
-            continue
-        cleaned.append({"title": title, "summary": summary})
-    if not cleaned:
-        raise RuntimeError("Model JSON returned no valid issues.")
-    payload["issues"] = cleaned
-    return payload
+    return parse_issues_json(raw)
 
 
 def _upsert_digest_summary(

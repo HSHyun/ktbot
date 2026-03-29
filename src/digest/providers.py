@@ -99,7 +99,7 @@ def summarise_with_gemini(prompt: str, model_name: str) -> dict[str, Any]:
     if not text:
         raise RuntimeError("Gemini returned no digest text.")
 
-    return _parse_issues_json(text)
+    return parse_issues_json(text)
 
 
 def _extract_text(payload: dict[str, Any]) -> str:
@@ -141,7 +141,7 @@ def _extract_error_message(resp: requests.Response) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _parse_issues_json(raw: str) -> dict[str, Any]:
+def parse_issues_json(raw: str) -> dict[str, Any]:
     text = raw.strip()
     if text.startswith("```"):
         lines = text.splitlines()

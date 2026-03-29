@@ -161,7 +161,7 @@ async def kakao_skill_subscribe(request: Request) -> dict[str, Any]:
         return _simple_text_response("사용자 정보를 확인하지 못했습니다. 다시 시도해 주세요.")
     if hours_window not in {6, 12, 24}:
         return _simple_text_response("요약 주기 정보를 확인하지 못했습니다.")
-    if send_hour is None or not (0 <= send_hour <= 23):
+    if not (0 <= send_hour <= 23):
         return _simple_text_response("발송 시간을 확인하지 못했습니다.")
 
     _upsert_kakao_subscription(
@@ -171,7 +171,7 @@ async def kakao_skill_subscribe(request: Request) -> dict[str, Any]:
         timezone_name=timezone_name,
     )
     return _simple_text_response(
-        f"{hours_window}시간 요약 / {send_hour:02d}시로 설정되었습니다."
+        f"매일 {send_hour:02d}시에 {hours_window}시간 요약을 보내드릴게요."
     )
 
 
