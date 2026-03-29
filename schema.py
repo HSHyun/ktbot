@@ -182,7 +182,6 @@ def ensure_tables(conn) -> None:
                 hours_window INT NOT NULL DEFAULT 6,
                 timezone VARCHAR(100) NOT NULL DEFAULT 'Asia/Seoul',
                 send_hour TINYINT NOT NULL DEFAULT 8,
-                send_minute TINYINT NOT NULL DEFAULT 0,
                 is_active BOOLEAN NOT NULL DEFAULT TRUE,
                 last_sent_window_end TIMESTAMP NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -195,6 +194,6 @@ def ensure_tables(conn) -> None:
             cur,
             "kakao_subscription",
             "idx_kakao_subscription_schedule",
-            "CREATE INDEX idx_kakao_subscription_schedule ON kakao_subscription (is_active, timezone, send_hour, send_minute);",
+            "CREATE INDEX idx_kakao_subscription_schedule ON kakao_subscription (is_active, timezone, send_hour);",
         )
     conn.commit()
