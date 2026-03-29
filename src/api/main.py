@@ -14,6 +14,8 @@ load_env_file(WORKSPACE_ROOT / ".env")
 
 app = FastAPI(title="ktbot API")
 
+SUBSCRIPTIONS_BLOCK_ID = "69c81882401fe450f4fa16c0" #내 설정 블럭 id
+
 def _simple_text_response(text: str) -> dict[str, Any]:
     return {
         "version": "2.0",
@@ -25,6 +27,25 @@ def _simple_text_response(text: str) -> dict[str, Any]:
                     }
                 }
             ]
+        },
+    }
+
+
+def _simple_text_response_with_quick_replies(
+    text: str,
+    quick_replies: list[dict[str, str]],
+) -> dict[str, Any]:
+    return {
+        "version": "2.0",
+        "template": {
+            "outputs": [
+                {
+                    "simpleText": {
+                        "text": text,
+                    }
+                }
+            ],
+            "quickReplies": quick_replies,
         },
     }
 
@@ -181,7 +202,16 @@ async def kakao_skill_subscribe(request: Request) -> dict[str, Any]:
             lines.append(
                 f"- {sub['hours_window']}시간 요약: 매일 {sub['send_hour']:02d}시"
             )
-    return _simple_text_response("\n".join(lines))
+    return _simple_text_response_with_quick_replies(
+        "\n".join(lines),
+        [
+            {
+                "label": "내 설정 보기",
+                "action": "block",
+                "blockId": SUBSCRIPTIONS_BLOCK_ID,
+            }
+        ],
+    )
 
 
 @app.post("/kakao/skill/subscriptions")
