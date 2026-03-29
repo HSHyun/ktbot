@@ -144,6 +144,8 @@ async def kakao_skill_subscribe(request: Request) -> dict[str, Any]:
 
     user = user_request.get("user")
     params = action.get("params")
+    if not isinstance(params, dict) or not params:
+        params = action.get("clientExtra")
     if not isinstance(user, dict) or not isinstance(params, dict):
         return _simple_text_response("요청 형식을 확인하지 못했습니다.")
 
@@ -208,6 +210,8 @@ async def kakao_skill_unsubscribe(request: Request) -> dict[str, Any]:
         return _simple_text_response("요청 형식을 확인하지 못했습니다.")
     user = user_request.get("user")
     params = action.get("params")
+    if not isinstance(params, dict) or not params:
+        params = action.get("clientExtra")
     if not isinstance(user, dict) or not isinstance(params, dict):
         return _simple_text_response("요청 형식을 확인하지 못했습니다.")
 
