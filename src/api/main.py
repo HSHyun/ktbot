@@ -31,21 +31,21 @@ def _simple_text_response(text: str) -> dict[str, Any]:
     }
 
 
-def _simple_text_response_with_quick_replies(
+def _text_card_response(
     text: str,
-    quick_replies: list[dict[str, str]],
+    buttons: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "version": "2.0",
         "template": {
             "outputs": [
                 {
-                    "simpleText": {
-                        "text": text,
+                    "textCard": {
+                        "description": text,
+                        "buttons": buttons,
                     }
                 }
-            ],
-            "quickReplies": quick_replies,
+            ]
         },
     }
 
@@ -202,12 +202,14 @@ async def kakao_skill_subscribe(request: Request) -> dict[str, Any]:
             lines.append(
                 f"- {sub['hours_window']}시간 요약: 매일 {sub['send_hour']:02d}시"
             )
-    return _simple_text_response_with_quick_replies(
+    return _text_card_response(
         "\n".join(lines),
         [
             {
                 "label": "내 설정 보기",
+                "highlight": "false",
                 "action": "block",
+                 "extra": {},
                 "blockId": SUBSCRIPTIONS_BLOCK_ID,
             }
         ],
