@@ -170,9 +170,18 @@ async def kakao_skill_subscribe(request: Request) -> dict[str, Any]:
         send_hour=send_hour,
         timezone_name=timezone_name,
     )
-    return _simple_text_response(
-        f"매일 {send_hour:02d}시에 {hours_window}시간 요약을 보내드릴게요."
-    )
+    subscriptions = _fetch_kakao_subscriptions(kakao_user_id)
+    active = [sub for sub in subscriptions if sub["is_active"]]
+
+    lines = [f"매일 {send_hour:02d}시에 {hours_window}시간 요약을 보내드릴게요."]
+    if active:
+        lines.append("")
+        lines.append("현재 구독 설정")
+        for sub in active:
+            lines.append(
+                f"- {sub['hours_window']}시간 요약: 매일 {sub['send_hour']:02d}시"
+            )
+    return _simple_text_response("\n".join(lines))
 
 
 @app.post("/kakao/skill/subscriptions")
