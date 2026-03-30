@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--slot-end",
         default=None,
-        help="UTC slot end timestamp to anchor digest windows (ISO 8601)",
+        help="Slot end timestamp to anchor digest windows (ISO 8601, offset allowed)",
     )
     return parser.parse_args()
 

@@ -5,3 +5,4 @@ groq
 pika
 fastapi
 uvicorn
+discord.py

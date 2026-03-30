@@ -196,4 +196,49 @@ def ensure_tables(conn) -> None:
             "idx_kakao_subscription_schedule",
             "CREATE INDEX idx_kakao_subscription_schedule ON kakao_subscription (is_active, timezone, send_hour);",
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS discord_subscription (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                discord_user_id VARCHAR(191) NOT NULL,
+                hours_window INT NOT NULL DEFAULT 6,
+                timezone VARCHAR(100) NOT NULL DEFAULT 'Asia/Seoul',
+                send_hour TINYINT NOT NULL DEFAULT 8,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                last_sent_window_end TIMESTAMP NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_discord_subscription_user_window (discord_user_id, hours_window)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+        )
+        _create_index_if_missing(
+            cur,
+            "discord_subscription",
+            "idx_discord_subscription_schedule",
+            "CREATE INDEX idx_discord_subscription_schedule ON discord_subscription (is_active, timezone, send_hour);",
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS discord_channel_subscription (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                discord_channel_id VARCHAR(191) NOT NULL,
+                discord_guild_id VARCHAR(191) NOT NULL,
+                hours_window INT NOT NULL DEFAULT 6,
+                timezone VARCHAR(100) NOT NULL DEFAULT 'Asia/Seoul',
+                send_hour TINYINT NOT NULL DEFAULT 8,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                last_sent_window_end TIMESTAMP NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_discord_channel_subscription_window (discord_channel_id, hours_window)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+        )
+        _create_index_if_missing(
+            cur,
+            "discord_channel_subscription",
+            "idx_discord_channel_subscription_schedule",
+            "CREATE INDEX idx_discord_channel_subscription_schedule ON discord_channel_subscription (is_active, timezone, send_hour);",
+        )
     conn.commit()
