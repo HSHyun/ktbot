@@ -8,8 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pymysql
-from groq import Groq
-from common.config import db_config_from_env, load_env_file, required_env
+from common.config import db_config_from_env, load_env_file
 from common.db import connect_db
 from digest.providers import parse_issues_json, resolve_digest_model, summarise_with_gemini
 from digest.windows import floor_to_slot_end, parse_slot_end, slot_window_bounds
@@ -197,26 +196,6 @@ def _build_prompt(items: list[dict], hours: int, template_text: str) -> str:
     return prompt[:120000]
 
 
-def _summarise_with_groq(
-    client: Groq,
-    model_name: str,
-    prompt: str,
-) -> dict[str, Any]:
-    completion = client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}],
-        max_completion_tokens=900,
-    )
-    choice = completion.choices[0]
-    raw = (choice.message.content or "").strip()
-    if not raw:
-        finish_reason = getattr(choice, "finish_reason", None)
-        raise RuntimeError(
-            f"Groq returned empty digest. finish_reason={finish_reason}, prompt_chars={len(prompt)}"
-        )
-    return parse_issues_json(raw)
-
-
 def _upsert_digest_summary(
     conn,
     *,
@@ -286,7 +265,6 @@ def main() -> None:
     db_config = db_config_from_env()
     with connect_db(db_config) as conn:
         _ensure_digest_table(conn)
-        groq_client: Groq | None = None
         any_saved = False
         slot_end = (
             parse_slot_end(args.slot_end)
@@ -312,15 +290,7 @@ def main() -> None:
 
             prompt = _build_prompt(items, hours, user_prompt_template)
             model_config = resolve_digest_model(hours)
-            if model_config.provider == "groq":
-                if groq_client is None:
-                    groq_client = Groq(api_key=required_env("GROQ_API_KEY"))
-                payload = _summarise_with_groq(
-                    groq_client,
-                    model_config.model_name,
-                    prompt,
-                )
-            elif model_config.provider == "gemini":
+            if model_config.provider == "gemini":
                 payload = summarise_with_gemini(prompt, model_config.model_name)
             else:
                 raise RuntimeError(

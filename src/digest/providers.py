@@ -44,11 +44,6 @@ class DigestModelConfig:
 def resolve_digest_model(hours: int) -> DigestModelConfig:
     if hours <= 0:
         raise RuntimeError(f"hours must be positive: {hours}")
-    if hours == 6:
-        return DigestModelConfig(
-            provider="groq",
-            model_name=(os.getenv("GROQ_DIGEST_MODEL") or "openai/gpt-oss-120b").strip(),
-        )
     return DigestModelConfig(
         provider="gemini",
         model_name=(os.getenv("GEMINI_DIGEST_MODEL") or "gemini-2.5-flash").strip(),

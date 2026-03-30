@@ -15,6 +15,7 @@ load_env_file(WORKSPACE_ROOT / ".env")
 app = FastAPI(title="ktbot API")
 
 SUBSCRIPTIONS_BLOCK_ID = "69c81882401fe450f4fa16c0" #내 설정 블럭 id
+MYSUBSCRIPTIONS_BLOCK_ID = "69c81882401fe450f4fa16c0"
 
 def _simple_text_response(text: str) -> dict[str, Any]:
     return {
@@ -207,7 +208,7 @@ async def kakao_skill_subscribe(request: Request) -> dict[str, Any]:
         [
             {
                 "label": "내 설정 보기",
-                "highlight": "false",
+                "highlight": False,
                 "action": "block",
                  "extra": {},
                 "blockId": SUBSCRIPTIONS_BLOCK_ID,
@@ -234,12 +235,23 @@ async def kakao_skill_subscriptions(request: Request) -> dict[str, Any]:
     if not active:
         return _simple_text_response("현재 등록된 구독 설정이 없습니다.")
 
-    lines = ["현재 구독 설정입니다."]
+    lines = ["현재 이렇게 보내드리고 있어요.", ""]
     for sub in active:
         lines.append(
-            f"- {sub['hours_window']}시간 요약 / {sub['send_hour']:02d}시"
+            f"- 매일 {sub['send_hour']:02d}시에 {sub['hours_window']}시간 요약"
         )
-    return _simple_text_response("\n".join(lines))
+    return _text_card_response(
+        "\n".join(lines),
+        [
+            {
+                "label": "구독 관리",
+                "highlight": False,
+                "action": "block",
+                 "extra": {},
+                "blockId": MYSUBSCRIPTIONS_BLOCK_ID,
+            }
+        ],
+    )
 
 
 @app.post("/kakao/skill/unsubscribe")
@@ -248,13 +260,13 @@ async def kakao_skill_unsubscribe(request: Request) -> dict[str, Any]:
     user_request = payload.get("userRequest")
     action = payload.get("action")
     if not isinstance(user_request, dict) or not isinstance(action, dict):
-        return _simple_text_response("요청 형식을 확인하지 못했습니다.")
+        return _simple_text_response("요청 형식을 확인하지 못했습니다. 다시 시도해 주세요.")
     user = user_request.get("user")
     params = action.get("params")
     if not isinstance(params, dict) or not params:
         params = action.get("clientExtra")
     if not isinstance(user, dict) or not isinstance(params, dict):
-        return _simple_text_response("요청 형식을 확인하지 못했습니다.")
+        return _simple_text_response("요청 형식을 확인하지 못했습니다. 다시 시도해 주세요.")
 
     kakao_user_id = str(user.get("id") or "").strip() or None
     if not kakao_user_id:
@@ -264,11 +276,13 @@ async def kakao_skill_unsubscribe(request: Request) -> dict[str, Any]:
         raw_hours_window = params.get("hours_window")
         hours_window = None if raw_hours_window in (None, "") else int(raw_hours_window)
     except (TypeError, ValueError):
-        return _simple_text_response("해제할 요약 주기를 확인하지 못했습니다.")
+        return _simple_text_response("해제할 요약 주기를 확인하지 못했습니다. 다시 시도해 주세요.")
 
     affected = _disable_kakao_subscription(kakao_user_id, hours_window)
     if affected <= 0:
-        return _simple_text_response("해제할 구독 설정이 없습니다.")
+        if hours_window is None:
+            return _simple_text_response("현재 해제할 구독 설정이 없습니다.")
+        return _simple_text_response(f"현재 {hours_window}시간 요약 구독은 등록되어있지 않아요.")
 
     if hours_window in {6, 12, 24}:
         return _simple_text_response(f"{hours_window}시간 요약 구독을 해제했습니다.")
