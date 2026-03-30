@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ load_env_file(WORKSPACE_ROOT / ".env")
 app = FastAPI(title="ktbot API")
 
 SUBSCRIPTIONS_BLOCK_ID = "69c81882401fe450f4fa16c0" #내 설정 블럭 id
-MYSUBSCRIPTIONS_BLOCK_ID = "69c81882401fe450f4fa16c0"
+MYSUBSCRIPTIONS_BLOCK_ID = "69cabcc9d7680e60177f072a" #구독 관리 Id
 
 def _simple_text_response(text: str) -> dict[str, Any]:
     return {
@@ -126,7 +127,8 @@ def _disable_kakao_subscription(kakao_user_id: str, hours_window: int | None) ->
                     UPDATE kakao_subscription
                     SET is_active = FALSE,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE kakao_user_id = %s
+                    WHERE kakao_user_id = %s  
+                      AND is_active = TRUE
                     """,
                     (kakao_user_id,),
                 )
@@ -138,12 +140,61 @@ def _disable_kakao_subscription(kakao_user_id: str, hours_window: int | None) ->
                         updated_at = CURRENT_TIMESTAMP
                     WHERE kakao_user_id = %s
                       AND hours_window = %s
+                        AND is_active = TRUE
                     """,
                     (kakao_user_id, hours_window),
                 )
             affected = int(cur.rowcount or 0)
         conn.commit()
     return affected
+
+
+def _fetch_latest_digest(hours_window: int) -> dict[str, Any] | None:
+    db_config = db_config_from_env()
+    with connect_db(db_config) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, window_start, window_end
+                FROM digest_summary
+                WHERE hours_window = %s
+                ORDER BY window_end DESC, id DESC
+                LIMIT 1
+                """,
+                (hours_window,),
+            )
+            digest_row = cur.fetchone()
+            if not digest_row:
+                return None
+
+            digest_id = int(digest_row[0])
+            cur.execute(
+                """
+                SELECT issue_order, title, summary
+                FROM digest_issue
+                WHERE digest_id = %s
+                ORDER BY issue_order ASC
+                """,
+                (digest_id,),
+            )
+            issue_rows = cur.fetchall()
+
+    issues: list[dict[str, Any]] = []
+    for row in issue_rows:
+        issues.append(
+            {
+                "issue_order": int(row[0]),
+                "title": str(row[1]),
+                "summary": str(row[2]),
+            }
+        )
+
+    return {
+        "digest_id": digest_id,
+        "window_start": digest_row[1],
+        "window_end": digest_row[2],
+        "issues": issues,
+    }
 
 
 @app.get("/healthz")
@@ -233,7 +284,7 @@ async def kakao_skill_subscriptions(request: Request) -> dict[str, Any]:
     subscriptions = _fetch_kakao_subscriptions(kakao_user_id)
     active = [sub for sub in subscriptions if sub["is_active"]]
     if not active:
-        return _simple_text_response("현재 등록된 구독 설정이 없습니다.")
+        return _simple_text_response("현재 구독 중인 요약이 없어요.")
 
     lines = ["현재 이렇게 보내드리고 있어요.", ""]
     for sub in active:
@@ -252,6 +303,49 @@ async def kakao_skill_subscriptions(request: Request) -> dict[str, Any]:
             }
         ],
     )
+
+
+@app.post("/kakao/skill/latest-digest")
+async def kakao_skill_latest_digest(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    action = payload.get("action")
+    if not isinstance(action, dict):
+        return _simple_text_response("요청 형식을 확인하지 못했습니다.")
+
+    params = action.get("params")
+    if not isinstance(params, dict) or not params:
+        params = action.get("clientExtra")
+    if not isinstance(params, dict):
+        return _simple_text_response("요청 형식을 확인하지 못했습니다.")
+
+    try:
+        hours_window = int(params.get("hours_window"))
+    except (TypeError, ValueError):
+        return _simple_text_response("조회할 요약 주기를 확인하지 못했습니다.")
+
+    if hours_window not in {6, 12, 24}:
+        return _simple_text_response("조회할 요약 주기를 확인하지 못했습니다.")
+
+    digest = _fetch_latest_digest(hours_window)
+    if not digest:
+        return _simple_text_response(f"아직 {hours_window}시간 요약이 없습니다.")
+
+    kst = timezone(timedelta(hours=9))
+    window_start = digest["window_start"].replace(tzinfo=timezone.utc).astimezone(kst)
+    window_end = digest["window_end"].replace(tzinfo=timezone.utc).astimezone(kst)
+
+    lines = [
+        f"가장 최근 {hours_window}시간 요약이에요.",
+        f"집계 구간: {window_start:%m/%d %H시} ~ {window_end:%m/%d %H시}",
+        "",
+    ]
+    for issue in digest["issues"]:
+        lines.append(f"{issue['issue_order']}. {issue['title']}")
+        summary = issue["summary"].replace("\n", " ").strip()
+        lines.append(summary)
+        lines.append("")
+
+    return _simple_text_response("\n".join(lines).strip())
 
 
 @app.post("/kakao/skill/unsubscribe")
@@ -281,9 +375,9 @@ async def kakao_skill_unsubscribe(request: Request) -> dict[str, Any]:
     affected = _disable_kakao_subscription(kakao_user_id, hours_window)
     if affected <= 0:
         if hours_window is None:
-            return _simple_text_response("현재 해제할 구독 설정이 없습니다.")
-        return _simple_text_response(f"현재 {hours_window}시간 요약 구독은 등록되어있지 않아요.")
+            return _simple_text_response("현재 구독 중인 요약이 없어요.")
+        return _simple_text_response(f"현재 {hours_window}시간 요약은 구독 중이 아니에요.")
 
     if hours_window in {6, 12, 24}:
-        return _simple_text_response(f"{hours_window}시간 요약 구독을 해제했습니다.")
+        return _simple_text_response(f"{hours_window}시간 요약 구독을 해제했어요.")
     return _simple_text_response("모든 구독을 해제했습니다.")
