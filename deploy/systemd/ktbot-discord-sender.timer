@@ -1,0 +1,10 @@
+[Unit]
+Description=Run KTBot Discord digest sender every hour
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1h
+Unit=ktbot-discord-sender.service
+
+[Install]
+WantedBy=timers.target
