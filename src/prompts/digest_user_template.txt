@@ -29,6 +29,7 @@ Analyze the community post dataset below and extract key issues currently being 
 - "issues" must be an array of 3~5 objects.
 - Each "title" must be a one-line Korean headline.
 - Each "summary" must be 2~4 concise Korean sentences.
+- Each "summary" must end at a complete sentence. Never cut off mid-sentence or mid-clause.
 - Do not output any introduction, conclusion, disclaimer, or extra keys.
 - Respond only in Korean for all string fields.
 

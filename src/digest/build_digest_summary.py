@@ -10,8 +10,9 @@ from typing import Any
 import pymysql
 from common.config import db_config_from_env, load_env_file
 from common.db import connect_db
-from digest.providers import parse_issues_json, resolve_digest_model, summarise_with_gemini
+from digest.providers import resolve_digest_model, summarise_with_gemini
 from digest.windows import floor_to_slot_end, parse_slot_end, slot_window_bounds
+from schema import ensure_tables
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "prompts"
 DEFAULT_USER_PROMPT_TEMPLATE_PATH = PROMPT_DIR / "digest_user_template.txt"
@@ -60,45 +61,6 @@ def _resolve_hours_list(raw_hours: list[int] | None) -> list[int]:
         seen.add(value)
         cleaned.append(value)
     return cleaned
-
-
-def _ensure_digest_table(conn) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS digest_summary (
-                id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                window_start TIMESTAMP NOT NULL,
-                window_end TIMESTAMP NOT NULL,
-                hours_window INT NOT NULL,
-                model_name VARCHAR(200) NOT NULL,
-                item_count INT NOT NULL DEFAULT 0,
-                meta JSON NOT NULL DEFAULT (JSON_OBJECT()),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                UNIQUE KEY uq_digest_window_model (window_start, window_end, model_name)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS digest_issue (
-                id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                digest_id BIGINT NOT NULL,
-                issue_order INT NOT NULL,
-                title TEXT NOT NULL,
-                summary LONGTEXT NOT NULL,
-                meta JSON NOT NULL DEFAULT (JSON_OBJECT()),
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                CONSTRAINT fk_digest_issue_digest
-                    FOREIGN KEY (digest_id) REFERENCES digest_summary(id) ON DELETE CASCADE,
-                UNIQUE KEY uq_digest_issue_order (digest_id, issue_order)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-            """
-        )
-    conn.commit()
-
 
 def _fetch_items(
     conn,
@@ -264,7 +226,7 @@ def main() -> None:
 
     db_config = db_config_from_env()
     with connect_db(db_config) as conn:
-        _ensure_digest_table(conn)
+        ensure_tables(conn)
         any_saved = False
         slot_end = (
             parse_slot_end(args.slot_end)
@@ -290,12 +252,7 @@ def main() -> None:
 
             prompt = _build_prompt(items, hours, user_prompt_template)
             model_config = resolve_digest_model(hours)
-            if model_config.provider == "gemini":
-                payload = summarise_with_gemini(prompt, model_config.model_name)
-            else:
-                raise RuntimeError(
-                    f"Unsupported digest provider: {model_config.provider}"
-                )
+            payload = summarise_with_gemini(prompt, model_config.model_name)
             issues = payload["issues"]
 
             item_ids = [int(row["id"]) for row in items if row.get("id") is not None]

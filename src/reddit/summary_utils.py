@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pymysql
 from groq import Groq
@@ -58,6 +59,31 @@ def fetch_comments_text(conn, item_id: int, limit: int = 20) -> list[str]:
     return lines
 
 
+def fetch_image_urls(conn, item_id: int, limit: int = 5) -> list[str]:
+    with conn.cursor(pymysql.cursors.DictCursor) as cur:
+        cur.execute(
+            """
+            SELECT url
+            FROM item_asset
+            WHERE item_id = %s
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (item_id, max(limit * 4, limit)),
+        )
+        rows = cur.fetchall()
+
+    urls: list[str] = []
+    for row in rows:
+        url = (row.get("url") or "").strip()
+        if not url or not _looks_like_image_url(url):
+            continue
+        urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
 def build_prompt(item: dict[str, Any], comment_lines: list[str], template_text: str) -> str:
     title = (item.get("title") or "").strip()
     url = item.get("url") or ""
@@ -77,10 +103,18 @@ def build_prompt(item: dict[str, Any], comment_lines: list[str], template_text: 
     return prompt[:24000]
 
 
-def summarise_with_groq(client: Groq, model_name: str, prompt: str) -> tuple[str, str]:
+def summarise_with_groq(
+    client: Groq,
+    model_name: str,
+    prompt: str,
+    image_urls: list[str] | None = None,
+) -> tuple[str, str]:
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for url in (image_urls or [])[:5]:
+        content.append({"type": "image_url", "image_url": {"url": url}})
     completion = client.chat.completions.create(
         model=model_name,
-        messages=[{"role": "user", "content": prompt}],
+        messages=[{"role": "user", "content": content}],
         max_completion_tokens=700,
     )
     raw = (completion.choices[0].message.content or "").strip()
@@ -94,6 +128,22 @@ def summarise_with_groq(client: Groq, model_name: str, prompt: str) -> tuple[str
     summary_title = lines[0]
     summary_text = "\n".join(lines[1:]).strip() if len(lines) > 1 else lines[0]
     return summary_text, summary_title
+
+
+def _looks_like_image_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    if path.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp")):
+        return True
+    return host in {
+        "i.redd.it",
+        "preview.redd.it",
+        "external-preview.redd.it",
+        "i.imgur.com",
+        "imgur.com",
+        "i.reddituploads.com",
+    }
 
 
 def upsert_item_summary(

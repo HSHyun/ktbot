@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,41 +61,57 @@ def required_gemini_api_key() -> str:
 
 def summarise_with_gemini(prompt: str, model_name: str) -> dict[str, Any]:
     api_key = required_gemini_api_key()
-    resp = requests.post(
-        f"{GEMINI_API_BASE}/v1beta/models/{model_name}:generateContent",
-        params={"key": api_key},
-        headers={"Content-Type": "application/json"},
-        json={
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": prompt}],
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "maxOutputTokens": 8192,
-                "responseMimeType": "application/json",
-                "responseJsonSchema": GEMINI_DIGEST_RESPONSE_SCHEMA,
+    last_error: RuntimeError | None = None
+    for attempt in range(3):
+        resp = requests.post(
+            f"{GEMINI_API_BASE}/v1beta/models/{model_name}:generateContent",
+            params={"key": api_key},
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": prompt}],
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "maxOutputTokens": 8192,
+                    "responseMimeType": "application/json",
+                    "responseJsonSchema": GEMINI_DIGEST_RESPONSE_SCHEMA,
+                },
             },
-        },
-        timeout=120,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(
-            f"Gemini API returned status {resp.status_code}: {_extract_error_message(resp)}"
+            timeout=120,
         )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Gemini API returned status {resp.status_code}: {_extract_error_message(resp)}"
+            )
 
-    try:
-        payload = resp.json()
-    except ValueError as exc:
-        raise RuntimeError("Invalid JSON from Gemini API.") from exc
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise RuntimeError("Invalid JSON from Gemini API.") from exc
 
-    text = _extract_text(payload)
-    if not text:
-        raise RuntimeError("Gemini returned no digest text.")
+        finish_reason = _extract_finish_reason(payload)
+        if finish_reason and finish_reason != "STOP":
+            last_error = RuntimeError(f"Gemini finishReason={finish_reason}")
+            continue
 
-    return parse_issues_json(text)
+        text = _extract_text(payload)
+        if not text:
+            last_error = RuntimeError("Gemini returned no digest text.")
+            continue
+
+        try:
+            return parse_issues_json(text)
+        except RuntimeError as exc:
+            last_error = RuntimeError(f"Gemini returned invalid digest JSON: {exc}")
+            if attempt < 2:
+                continue
+            raise last_error from exc
+
+    raise last_error or RuntimeError("Gemini digest generation failed.")
 
 
 def _extract_text(payload: dict[str, Any]) -> str:
@@ -117,6 +134,19 @@ def _extract_text(payload: dict[str, Any]) -> str:
                 texts.append(text.strip())
         if texts:
             return "\n".join(texts).strip()
+    return ""
+
+
+def _extract_finish_reason(payload: dict[str, Any]) -> str:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return ""
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        finish_reason = candidate.get("finishReason")
+        if isinstance(finish_reason, str):
+            return finish_reason.strip()
     return ""
 
 
@@ -152,15 +182,26 @@ def parse_issues_json(raw: str) -> dict[str, Any]:
     if not isinstance(issues, list):
         raise RuntimeError("Model JSON must include 'issues' array.")
     cleaned: list[dict[str, str]] = []
-    for issue in issues:
+    for idx, issue in enumerate(issues, start=1):
         if not isinstance(issue, dict):
-            continue
+            raise RuntimeError(f"Model issue #{idx} must be an object.")
         title = str(issue.get("title") or "").strip()
-        summary = str(issue.get("summary") or "").strip()
-        if not title or not summary:
-            continue
+        summary = " ".join(str(issue.get("summary") or "").split())
+        if not title:
+            raise RuntimeError(f"Model issue #{idx} is missing title.")
+        if not summary:
+            raise RuntimeError(f"Model issue #{idx} is missing summary.")
+        if not _is_complete_summary(summary):
+            raise RuntimeError(f"Model issue #{idx} summary looks incomplete.")
         cleaned.append({"title": title, "summary": summary})
     if not cleaned:
         raise RuntimeError("Model JSON returned no valid issues.")
     payload["issues"] = cleaned
     return payload
+
+
+def _is_complete_summary(summary: str) -> bool:
+    if not re.search(r"[.!?](?:[\"')\]]+)?$", summary):
+        return False
+    sentence_count = len(re.findall(r"[.!?](?:[\"')\]]+)?(?:\s|$)", summary))
+    return 2 <= sentence_count <= 4

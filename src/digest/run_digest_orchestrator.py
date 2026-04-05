@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -14,7 +14,11 @@ import requests
 from common.config import db_config_from_env, load_env_file, rabbitmq_config_from_env
 from common.db import connect_db
 from digest.providers import resolve_digest_model
-from digest.windows import floor_to_slot_end, is_window_due_at_slot, slot_window_bounds
+from digest.windows import (
+    SLOT_HOURS,
+    floor_to_slot_end,
+    is_window_due_at_slot,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -113,33 +117,25 @@ def _resolve_digest_hours(raw: list[int] | None) -> list[int]:
     return cleaned
 
 
-def _digest_exists_for_slot(
+def _existing_digest_window_ends(
     conn,
     *,
-    window_start: datetime,
-    window_end: datetime,
     hours: int,
     digest_model: str,
-) -> bool:
+) -> list[datetime]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT 1
+            SELECT window_end
             FROM digest_summary
-            WHERE window_start = %s
-              AND window_end = %s
-              AND hours_window = %s
+            WHERE hours_window = %s
               AND model_name = %s
-            LIMIT 1
+            ORDER BY window_end ASC
             """,
-            (
-                window_start.replace(tzinfo=None),
-                window_end.replace(tzinfo=None),
-                hours,
-                digest_model,
-            ),
+            (hours, digest_model),
         )
-        return cur.fetchone() is not None
+        rows = cur.fetchall()
+    return [row[0].replace(tzinfo=timezone.utc) for row in rows if row and row[0] is not None]
 
 
 def _run_digest_once(
@@ -193,40 +189,47 @@ def main() -> None:
 
     db_config = db_config_from_env()
     slot_end = floor_to_slot_end(datetime.now(timezone.utc))
-    due_hours: list[int] = []
+    due_runs: list[tuple[int, datetime]] = []
     with connect_db(db_config) as conn:
         for hours in digest_hours:
-            if not is_window_due_at_slot(slot_end, hours):
-                continue
-            window_start, window_end = slot_window_bounds(slot_end, hours)
             model_config = resolve_digest_model(hours)
-            if not _digest_exists_for_slot(
+            existing_window_ends = _existing_digest_window_ends(
                 conn,
-                window_start=window_start,
-                window_end=window_end,
                 hours=hours,
                 digest_model=model_config.model_name,
-            ):
-                due_hours.append(hours)
+            )
+            existing_window_end_set = set(existing_window_ends)
+            if not existing_window_ends:
+                slot_cursor = slot_end
+            else:
+                slot_cursor = existing_window_ends[0]
+            while slot_cursor <= slot_end:
+                if not is_window_due_at_slot(slot_cursor, hours):
+                    slot_cursor += timedelta(hours=SLOT_HOURS)
+                    continue
+                if slot_cursor not in existing_window_end_set:
+                    due_runs.append((hours, slot_cursor))
+                slot_cursor += timedelta(hours=SLOT_HOURS)
 
-    if not due_hours:
+    if not due_runs:
         print(f"[digest] no due windows slot_end={slot_end.isoformat()}")
         return
 
+    due_runs.sort(key=lambda row: (row[1], row[0]))
     due_models = {
-        hours: resolve_digest_model(hours).model_name for hours in due_hours
+        hours: resolve_digest_model(hours).model_name for hours, _ in due_runs
     }
     print(
-        f"[digest] slot_end={slot_end.isoformat()}, due_hours={due_hours}, models={due_models}, "
+        f"[digest] slot_end={slot_end.isoformat()}, due_runs={[(hours, run_slot.isoformat()) for hours, run_slot in due_runs]}, models={due_models}, "
         f"item_summary_model={item_summary_model}, limit={args.limit}"
     )
-    for hours in due_hours:
+    for hours, run_slot_end in due_runs:
         _run_digest_once(
             env_file=env_file,
             hours=hours,
             limit=args.limit,
             item_summary_model=item_summary_model,
-            slot_end=slot_end,
+            slot_end=run_slot_end,
         )
 
 

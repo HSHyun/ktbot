@@ -4,9 +4,7 @@ import argparse
 import json
 import os
 import re
-import sys
 from datetime import timezone
-from pathlib import Path
 
 from common.config import db_config_from_env, load_env_file, rabbitmq_config_from_env
 from common.db import connect_db
@@ -14,12 +12,7 @@ from common.queue import declare_durable_queue, open_rabbitmq_connection, publis
 
 from reddit.client import RedditAPIClient, RedditOAuthCredentials
 from reddit.models import RedditComment, RedditPost
-
-WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-if str(WORKSPACE_ROOT) not in sys.path:
-    sys.path.append(str(WORKSPACE_ROOT))
-
-from schema import ensure_tables  # noqa: E402
+from schema import ensure_tables
 
 DEFAULT_SUBREDDITS = ["OpenAI", "singularity", "ClaudeAI"]
 

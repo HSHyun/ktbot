@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import time
 from typing import Any
 
 import pymysql
@@ -20,6 +19,7 @@ from common.queue import declare_durable_queue, open_rabbitmq_connection
 from reddit.summary_utils import (
     build_prompt,
     fetch_comments_text,
+    fetch_image_urls,
     read_text,
     summarise_with_groq,
     upsert_item_summary,
@@ -126,11 +126,13 @@ def main() -> None:
                     return
 
                 comments = fetch_comments_text(conn, item_id=item_id, limit=20)
+                image_urls = fetch_image_urls(conn, item_id=item_id, limit=5)
                 prompt = build_prompt(item, comments, prompt_template)
                 summary_text, summary_title = summarise_with_groq(
                     client=client,
                     model_name=model_name,
                     prompt=prompt,
+                    image_urls=image_urls,
                 )
                 upsert_item_summary(
                     conn,
@@ -141,6 +143,7 @@ def main() -> None:
                     meta={
                         "source_code": item.get("source_code"),
                         "comment_count_used": len(comments),
+                        "image_count_used": len(image_urls),
                         "queue": queue_name,
                     },
                 )
@@ -151,8 +154,6 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001
             print(f"[worker-fail] item_id={item_id} err={exc}")
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-        finally:
-            time.sleep(60)
 
     channel.basic_consume(queue=queue_name, on_message_callback=on_message, auto_ack=False)
     try:

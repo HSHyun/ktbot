@@ -11,6 +11,7 @@ from common.db import connect_db
 from reddit.summary_utils import (
     build_prompt,
     fetch_comments_text,
+    fetch_image_urls,
     read_text,
     summarise_with_groq,
     upsert_item_summary,
@@ -92,12 +93,14 @@ def main() -> None:
         for item in targets:
             item_id = int(item["id"])
             comments = fetch_comments_text(conn, item_id=item_id, limit=20)
+            image_urls = fetch_image_urls(conn, item_id=item_id, limit=5)
             prompt = build_prompt(item, comments, user_prompt_template)
             try:
                 summary_text, summary_title = summarise_with_groq(
                     client=client,
                     model_name=model_name,
                     prompt=prompt,
+                    image_urls=image_urls,
                 )
                 upsert_item_summary(
                     conn,
@@ -108,6 +111,7 @@ def main() -> None:
                     meta={
                         "source_code": item.get("source_code"),
                         "comment_count_used": len(comments),
+                        "image_count_used": len(image_urls),
                     },
                 )
                 success += 1

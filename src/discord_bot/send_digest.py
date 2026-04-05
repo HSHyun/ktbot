@@ -14,7 +14,7 @@ WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 load_env_file(WORKSPACE_ROOT / ".env")
 
 KST = timezone(timedelta(hours=9))
-MESSAGE_LIMIT = 1800
+MESSAGE_LIMIT = 2000
 
 
 def _fetch_active_dm_subscriptions() -> list[dict[str, Any]]:
@@ -188,10 +188,29 @@ def _mark_channel_sent(discord_channel_id: str, hours_window: int, window_end: d
 
 
 async def _send_text(target: Any, text: str) -> None:
-    remaining = text
-    while remaining:
-        await target.send(remaining[:MESSAGE_LIMIT])
-        remaining = remaining[MESSAGE_LIMIT:]
+    chunks: list[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        candidate = block if not current else f"{current}\n\n{block}"
+        if len(candidate) <= MESSAGE_LIMIT:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if len(block) <= MESSAGE_LIMIT:
+            current = block
+            continue
+        remaining = block
+        while len(remaining) > MESSAGE_LIMIT:
+            chunks.append(remaining[:MESSAGE_LIMIT])
+            remaining = remaining[MESSAGE_LIMIT:]
+        current = remaining
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        await target.send(chunk)
 
 
 class DigestSender(discord.Client):

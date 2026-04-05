@@ -434,13 +434,6 @@ async def subscribe_channel(
     hours_window: app_commands.Choice[int],
     send_hour: app_commands.Range[int, 0, 23],
 ) -> None:
-    if interaction.channel_id is None or interaction.guild_id is None:
-        await interaction.response.send_message(
-            "서버 채널에서만 사용할 수 있어요.",
-            ephemeral=True,
-        )
-        return
-
     _upsert_discord_channel_subscription(
         discord_channel_id=str(interaction.channel_id),
         discord_guild_id=str(interaction.guild_id),
@@ -462,13 +455,6 @@ async def subscribe_channel(
 @app_commands.guild_only()
 @app_commands.checks.has_permissions(manage_channels=True)
 async def channelsettings(interaction: discord.Interaction) -> None:
-    if interaction.channel_id is None:
-        await interaction.response.send_message(
-            "서버 채널에서만 사용할 수 있어요.",
-            ephemeral=True,
-        )
-        return
-
     await interaction.response.send_message(
         _channel_settings_text(str(interaction.channel_id)),
         ephemeral=True,
@@ -493,13 +479,6 @@ async def unsubscribe_channel(
     interaction: discord.Interaction,
     hours_window: app_commands.Choice[int],
 ) -> None:
-    if interaction.channel_id is None:
-        await interaction.response.send_message(
-            "서버 채널에서만 사용할 수 있어요.",
-            ephemeral=True,
-        )
-        return
-
     affected = _disable_discord_channel_subscription(
         str(interaction.channel_id),
         hours_window.value,
